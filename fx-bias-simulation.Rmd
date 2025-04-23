@@ -1,0 +1,206 @@
+---
+title: "Untitled"
+author: "Itamar Caspi"
+date: "24 11 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(lpirfs)
+library(hrbrthemes)
+library(matrixStats)
+library(patchwork)
+library(foreach)
+```
+
+```{r}
+set.seed(1203)
+```
+
+```{r}
+obs   <- 100
+hor   <- 10
+rep   <- 100
+
+ar_shock <- 0.8
+p_shock  <- 0.2
+sd_u     <- 0.2
+```
+
+## Independent FX shock
+```{r}
+irfs_ind <- c()
+
+for (i in 1:rep) {
+  u1      <- rnorm(obs, sd = sd_u)
+  u_shock <- rbinom(obs, 1, p_shock)
+  u2      <- (1 - u_shock) * rnorm(obs, sd = sd_u)
+  u3      <- rnorm(obs, sd = sd_u)
+  
+  y1 <- cumsum(u1)
+  y2 <- cumsum(u2)
+  y3 <- cumsum(u3)
+  
+  y_shock <- arima.sim(
+    list(order = c(1,0,0), ar = ar_shock),
+    innov = ts(u_shock),
+    n = obs
+  ) %>% 
+    as.numeric()
+
+  y <- 1 + y1 + y2 + y_shock + y3
+  
+  results <- 
+    lp_lin_iv(
+      endog_data = y %>% as_tibble(),
+      lags_endog_lin = 0,
+      shock = u_shock %>% as_tibble(),
+      trend = 0,
+      use_nw = FALSE,
+      confint = 1.96,
+      hor = hor
+    )
+  
+  irfs_ind <- cbind(irfs_ind, results$irf_lin_mean[1, ])
+}
+```
+
+```{r}
+cl <- parallel::makeCluster(2)
+doParallel::registerDoParallel(cl)
+
+irfs_ind <- foreach(i = 1:50, .combine = "cbind", .packages = "lpirfs") %dopar% {
+  u1      <- rnorm(obs, sd = sd_u)
+  u_shock <- rbinom(obs, 1, p_shock)
+  u2      <- (1 - u_shock) * rnorm(obs, sd = sd_u)
+  u3      <- rnorm(obs, sd = sd_u)
+  
+  y1 <- cumsum(u1)
+  y2 <- cumsum(u2)
+  y3 <- cumsum(u3)
+  
+  y_shock <- arima.sim(
+    list(order = c(1,0,0), ar = ar_shock),
+    innov = ts(u_shock),
+    n = obs
+  )
+  y_shock <- as.numeric(y_shock)
+
+  y <- 1 + y1 + y2 + y_shock + y3
+  
+  results <- 
+    lp_lin_iv(
+      endog_data = as.data.frame(y),
+      lags_endog_lin = 0,
+      shock = as.data.frame(u_shock),
+      trend = 0,
+      use_nw = FALSE,
+      confint = 1.96,
+      hor = hor
+    )
+  
+  results$irf_lin_mean[1, ]
+}
+
+parallel::stopCluster(cl)
+```
+
+
+## Dependent FX shock
+```{r}
+irfs_dep <- c()
+
+for (i in 1:rep) {
+  u1      <- rnorm(obs, sd = sd_u)
+  q       <- qnorm(p_shock, sd = sd_u)
+  u_shock <- if_else(u1 <= q, 1, 0)
+  u2      <- (1 - u_shock) * rnorm(obs, sd = sd_u)
+  u3      <- rnorm(obs, sd = sd_u)
+  
+  y1 <- cumsum(u1)
+  y2 <- cumsum(u2)
+  y3 <- cumsum(u3)
+  
+  y_shock <- arima.sim(
+    list(order = c(1,0,0), ar = ar_shock),
+    innov = ts(u_shock),
+    n = obs
+  ) %>% 
+    as.numeric()
+  
+  y <- 1 + y1 + y2 + y_shock + y3
+  
+  results <- 
+    lp_lin_iv(
+      endog_data = y %>% as_tibble(),
+      lags_endog_lin = 0,
+      shock = u_shock %>% as_tibble(),
+      trend = 0,
+      use_nw = FALSE,
+      confint = 1.96,
+      hor = hor
+    )
+  
+  irfs_dep <- cbind(irfs_dep, results$irf_lin_mean[1, ])
+}
+```
+
+
+```{r}
+rowSDs <- function(x) {
+  sqrt(rowSums((x - rowMeans(x))^2)/(dim(x)[2] - 1))
+}
+
+irf_ind_dist <- 
+  irfs_ind %>% 
+  as_tibble() %>% 
+  mutate(
+    mean_ind = rowMeans(across(where(is.numeric))),
+    sd_ind   = rowSDs(across(where(is.numeric))),
+  ) %>% 
+  select(mean_ind, sd_ind)
+
+irf_dep_dist <- 
+  irfs_dep %>% 
+  as_tibble() %>% 
+  mutate(
+    mean_dep = rowMeans(across(where(is.numeric))),
+    sd_dep   = rowSDs(across(where(is.numeric))),
+  ) %>% 
+  select(mean_dep, sd_dep)
+```
+
+
+## Plot
+
+```{r}
+irf_plot_data <- 
+  irf_ind_dist %>% 
+  bind_cols(irf_dep_dist) %>% 
+  mutate(h = 1:hor) %>% 
+  select(h, starts_with("mean")) %>% 
+  pivot_longer(-h, names_to = "type", values_to = "mean")
+```
+
+
+```{r}
+irf_plot_data %>% 
+  ggplot(aes(h, mean, color = type)) +
+  geom_line(size = 1) +
+  geom_hline(aes(yintercept = 0)) +
+  scale_color_viridis_d(labels = c("endogenous", "exogenous")) +
+  theme_ipsum() +
+  scale_x_continuous(limits = c(1, hor), breaks = seq(0, hor, 2)) +
+  labs(
+    x = "Horizon",
+    y = "",
+    color = "",
+    subtitle = expression("Bias due to endogeneity in u"[1])
+  ) +
+  theme(legend.position="bottom")
+```

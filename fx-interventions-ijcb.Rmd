@@ -1,0 +1,242 @@
+---
+title: "Untitled"
+author: "Itamar Caspi"
+date: "23 11 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(readxl)
+library(lpirfs)
+library(hrbrthemes)
+library(RcppRoll)
+library(showtext)
+library(latex2exp)
+library(paletteer)
+```
+
+```{r}
+showtext_auto()
+# font_add_google("Gentium Book Basic", "book")
+```
+
+
+## Read data
+```{r}
+df_raw <- 
+  read_tsv("data/data_new.txt")
+
+df_rr  <- 
+  read_xlsx("data/rr-euro.xlsx") %>%
+  mutate(date = ymd(Date)) %>% 
+  rename(rr = PX_BID) %>% 
+  select(-Date)
+
+df_opt <- 
+  read_xlsx("data/sd-opt-eurodollar.xlsx") %>%
+  mutate(date = ymd(Date)) %>% 
+  rename(opt = PX_BID) %>% 
+  select(-Date)
+
+df_quant <- 
+  read_xlsx("data/data_quantities.xlsx") %>%
+  mutate(date   = ymd(date))
+```
+
+## Parameters
+```{r}
+hor     <- 100  # irf horizon
+vol_win <- 20    # volatility window
+```
+
+## Processing
+```{r}
+df <- 
+  df_raw %>% 
+  mutate(
+    date    = dmy(Date),
+    ly      = 100 * log(closing_rate),
+    dy      = ly - lag(ly, 1),
+    u_fxi   = 100 * return_3,
+    u1      = 100 * log(f_inv_prox / lag(closing_rate, 1)),
+    u3      = 100 * log(closing_rate / l_inv_prox),
+    vol     = roll_sdr(dy, vol_win),
+    vol_l   = lag(vol, 1),
+    bas     = 100 * (ASK - BID) / MID,
+    bas_l   = lag(bas, 1),
+    d_0911  = if_else(date <= ymd("2011-12-31"), 1, 0),
+    d_1317  = if_else(date >= ymd("2013-01-01"), 1, 0)
+  ) %>% 
+  filter(between(date, ymd("2009-09-08"), ymd("2017-04-28"))) %>% 
+  replace_na(list(u_fxi = 0, u1 = 0, u3 = 0)) %>% 
+  select(date, ly, dy, u_fxi, u1, u3, vol_l, bas_l, starts_with("d_")) %>% 
+  left_join(df_rr) %>% 
+  left_join(df_opt) %>% 
+  left_join(df_quant) %>% 
+  mutate(
+    sum = if_else(is.na(sum), 0, sum),
+    sum = sum / 1e6
+  )
+```
+
+
+```{r}
+endog_data <- 
+  df %>% 
+  select(ly)
+
+shock_data <- 
+  df %>% 
+  select(u_fxi)
+```
+
+## Estimation
+
+All
+```{r}
+exog_data <- 
+  df %>% 
+  select()
+
+results_lin_iv <- 
+  lp_lin_iv(
+    endog_data = endog_data,
+    lags_endog_lin = 1,
+    shock = shock_data,
+    exog_data = exog_data,
+    lags_exog = 0,
+    trend = 0,
+    confint = 1.65,
+    hor = hor
+  )
+
+irf <- 
+  tibble(
+    type = "No control",
+    h    = 1:hor,
+    mean = results_lin_iv$irf_lin_mean[1, ], 
+    up   = results_lin_iv$irf_lin_up[1, ],
+    low  = results_lin_iv$irf_lin_low[1, ] 
+  )
+```
+
+2009-2011
+```{r}
+results_lin_iv <- 
+  lp_lin_iv(
+    endog_data = endog_data %>% slice(1:576),
+    lags_endog_lin = 1,
+    shock = shock_data %>% slice(1:576),
+    exog_data = exog_data %>% slice(1:576),
+    lags_exog = 0,
+    trend = 0,
+    confint = 1.65,
+    hor = hor
+  )
+
+irf_09 <- 
+  tibble(
+    type = "2009-2011",
+    h    = 1:hor,
+    mean = results_lin_iv$irf_lin_mean[1, ], 
+    up   = results_lin_iv$irf_lin_up[1, ],
+    low  = results_lin_iv$irf_lin_low[1, ] 
+  )
+```
+
+2013-2017
+```{r}
+results_lin_iv <- 
+  lp_lin_iv(
+    endog_data = endog_data %>% slice(829:1902),
+    lags_endog_lin = 1,
+    shock = shock_data %>% slice(829:1902),
+    exog_data = exog_data %>% slice(829:1902),
+    lags_exog = 0,
+    trend = 0,
+    confint = 1.65,
+    hor = hor
+  )
+
+irf_13 <- 
+  tibble(
+    type = "2013-2017",
+    h    = 1:hor,
+    mean = results_lin_iv$irf_lin_mean[1, ], 
+    up   = results_lin_iv$irf_lin_up[1, ],
+    low  = results_lin_iv$irf_lin_low[1, ] 
+  )
+```
+
+With u1
+```{r}
+exog_data <- 
+  df %>% 
+  select(u1)
+
+results_lin_iv <- 
+  lp_lin_iv(
+    endog_data = endog_data %>% slice(829:1902),
+    lags_endog_lin = 1,
+    shock = shock_data %>% slice(829:1902),
+    exog_data = exog_data %>% slice(829:1902),
+    lags_exog = 0,
+    trend = 0,
+    confint = 1.65,
+    hor = hor
+  )
+
+irf_u1 <- 
+  tibble(
+    type = "Control",
+    h    = 1:hor,
+    mean = results_lin_iv$irf_lin_mean[1, ], 
+    up   = results_lin_iv$irf_lin_up[1, ],
+    low  = results_lin_iv$irf_lin_low[1, ] 
+  )
+```
+
+
+```{r}
+df_irf <- bind_rows(irf, irf_09, irf_13, irf_u1)
+```
+
+## Plot IRFs
+```{r}
+df_irf %>% 
+  filter(type %in% c("No control", "Control")) %>% 
+  ggplot(aes(h, mean, color = factor(type, levels = c("No control", "Control")))) +
+  geom_line(size = 1.2) +
+  geom_ribbon(
+    aes(ymin = low, ymax = up, fill = factor(type, levels = c("No control", "Control")), color = factor(type, levels = c("No control", "Control"))),
+    # color = NA,
+    alpha = 0,
+    linetype = 2,
+    size = 1.2
+  ) +
+  geom_hline(aes(yintercept = 0), linetype = 2) +
+  # scale_fill_paletteer_d("ggthemes::Color_Blind") +
+  # scale_color_paletteer_d("ggthemes::Color_Blind") +
+  scale_color_grey(start = 0, end = .6) +
+  scale_fill_grey(start = 0, end = .6) +
+  xlim(0, hor) +
+  labs(
+    x = "Horizon",
+    y = "Percent",
+    subtitle = "",
+    color = "",
+    fill = ""
+  ) +
+  theme_ipsum(base_family = "book") +
+  theme(
+    axis.title.x = element_text(size=rel(1.3)),
+    axis.title.y = element_text(size=rel(1.3)),
+    legend.position = "bottom"
+  )
+```

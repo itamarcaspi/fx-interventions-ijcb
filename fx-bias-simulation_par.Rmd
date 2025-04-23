@@ -1,0 +1,252 @@
+---
+title: "Untitled"
+author: "Itamar Caspi"
+date: "24 11 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+```{r}
+library(tidyverse)
+library(lpirfs)
+library(hrbrthemes)
+library(matrixStats)
+library(patchwork)
+library(foreach)
+library(paletteer)
+library(showtext)
+```
+
+```{r}
+showtext_auto()
+font_add_google("Gentium Book Basic", "book")
+```
+
+## Setup
+```{r}
+set.seed(1203)
+
+obs   <- 1857  # sample size
+hor   <- 50    # IRF horizon
+rep   <- 500    # replications
+
+ar_shock <- 0.95  # persistence of fx shock
+p_shock  <- 0.2   # probability of fx shock
+sd_u     <- (p_shock * (1 - p_shock))  # standard deviation of non-fx shocks
+```
+
+## Register clusters
+```{r}
+cl <- parallel::makeCluster(3)
+doParallel::registerDoParallel(cl)
+```
+
+## Independent FX shock
+```{r}
+irfs_ind <- foreach(i = 1:rep, .combine = "cbind", .packages = "lpirfs") %dopar% {
+  u1      <- rnorm(obs + hor, sd = sd_u)
+  p_fxi   <- rbinom(obs + hor, 1, p_shock)
+  u_fxi   <- p_fxi * abs(rnorm(obs + hor, sd = sd_u))
+  u3      <- rnorm(obs + hor, sd = sd_u)
+  
+  y1 <- cumsum(u1)[(hor+1):(hor+obs)]
+  y3 <- cumsum(u3)[(hor+1):(hor+obs)]
+  
+  y_fxi <- c(rep(NA, obs))
+  for(j in 1:obs) {
+    u_sum <- 0
+    for(k in hor:1) {
+      u_sum <- u_sum + k/hor * u_fxi[j+k]
+    }
+    y_fxi[j] <- u_sum  
+  }
+  
+  y <- y1 + y_fxi + y3
+  
+  results <- 
+    lp_lin_iv(
+      endog_data = as.data.frame(y),
+      lags_endog_lin = 0,
+      shock = as.data.frame(u_fxi[(hor+1):(hor+obs)]),
+      trend = 0,
+      use_nw = FALSE,
+      confint = 1.96,
+      hor = 100
+    )
+  
+  results$irf_lin_mean[1, ]
+}
+```
+
+## Dependent FX shock
+```{r}
+irfs_dep <- foreach(i = 1:rep, .combine = "cbind", .packages = "lpirfs") %dopar% {
+  u1      <- rnorm(obs + hor, sd = sd_u)
+  q       <- qnorm(p_shock, sd = sd_u)
+  p_fxi   <- ifelse(u1 <= q, 1, 0)
+  u_fxi   <- p_fxi * abs(rnorm(obs + hor, sd = sd_u))
+  u3      <- rnorm(obs + hor, sd = sd_u)
+  
+  y1 <- cumsum(u1)[(hor+1):(hor+obs)]
+  y3 <- cumsum(u3)[(hor+1):(hor+obs)]
+  
+  y_fxi <- c(rep(NA, obs))
+  for(j in 1:obs) {
+    u_sum <- 0
+    for(k in hor:1) {
+      u_sum <- u_sum + k/hor * u_fxi[j+k]
+    }
+    y_fxi[j] <- u_sum  
+  }
+  
+  y <- 1 + y1 + y_fxi + y3
+  
+  results <- 
+    lp_lin_iv(
+      endog_data = as.data.frame(y),
+      lags_endog_lin = 0,
+      shock = as.data.frame(u_fxi[(hor+1):(hor+obs)]),
+      trend = 0,
+      use_nw = FALSE,
+      confint = 1.96,
+      hor = 100
+    )
+  
+  results$irf_lin_mean[1, ]
+}
+```
+
+## Dependent FX shock with control
+```{r}
+irfs_dep_con <- foreach(i = 1:rep, .combine = "cbind", .packages = "lpirfs") %dopar% {
+  u1      <- rnorm(obs + hor, sd = sd_u)
+  q       <- qnorm(p_shock, sd = sd_u)
+  p_fxi   <- ifelse(u1 <= q, 1, 0)
+  u_fxi   <- p_fxi * abs(rnorm(obs + hor, sd = sd_u))
+  u3      <- rnorm(obs + hor, sd = sd_u)
+  u1_star <- (p_fxi[(hor+1):(hor+obs)]) * u1[(hor+1):(hor+obs)]
+
+  
+  y1 <- cumsum(u1)[(hor+1):(hor+obs)]
+  y3 <- cumsum(u3)[(hor+1):(hor+obs)]
+  
+  y_fxi <- c(rep(NA, obs))
+  for(j in 1:obs) {
+    u_sum <- 0
+    for(k in hor:1) {
+      u_sum <- u_sum + k/hor * u_fxi[j+k]
+    }
+    y_fxi[j] <- u_sum  
+  }
+  
+  y <- 1 + y1 + y_fxi + y3
+  
+  results <- 
+    lp_lin_iv(
+      endog_data = as.data.frame(y),
+      lags_endog_lin = 0,
+      shock = as.data.frame(u_fxi[(hor+1):(hor+obs)]),
+      exog_data = as.data.frame(u1_star[(hor+1):(hor+obs)]),
+      lags_exog = 0,
+      trend = 0,
+      use_nw = FALSE,
+      confint = 1.96,
+      hor = 100
+    )
+  
+  results$irf_lin_mean[1, ]
+}
+```
+
+## Close cluster
+```{r}
+parallel::stopCluster(cl)
+```
+
+## Calculate summary stats
+```{r}
+rowSDs <- function(x) {
+  sqrt(rowSums((x - rowMeans(x))^2)/(dim(x)[2] - 1))
+}
+```
+
+```{r}
+irf_ind_dist <- 
+  irfs_ind %>% 
+  as_tibble() %>% 
+  mutate(
+    med_ind  = miscTools::rowMedians(across(where(is.numeric))),
+    mean_ind = rowMeans(across(where(is.numeric))),
+    sd_ind   = rowSDs(across(where(is.numeric))),
+  ) %>% 
+  select(mean_ind, sd_ind, med_ind)
+
+irf_dep_dist <- 
+  irfs_dep %>% 
+  as_tibble() %>% 
+  mutate(
+    med_dep  = miscTools::rowMedians(across(where(is.numeric))),
+    mean_dep = rowMeans(across(where(is.numeric))),
+    sd_dep   = rowSDs(across(where(is.numeric))),
+  ) %>% 
+  select(mean_dep, sd_dep, med_dep)
+
+irf_dep_con_dist <- 
+  irfs_dep_con %>% 
+  as_tibble() %>% 
+  mutate(
+    med_dep_con  = miscTools::rowMedians(across(where(is.numeric))),
+    mean_dep_con = rowMeans(across(where(is.numeric))),
+    sd_dep_con   = rowSDs(across(where(is.numeric))),
+  ) %>% 
+  select(mean_dep_con, sd_dep_con, med_dep_con)
+```
+
+## Plot IRFs
+```{r}
+irf_plot_data <- 
+  irf_ind_dist %>% 
+  bind_cols(irf_dep_dist, irf_dep_con_dist) %>% 
+  mutate(h = 1:100) %>% 
+  select(h, starts_with("mean")) %>% 
+  pivot_longer(-h, names_to = "type", values_to = "mean")
+```
+
+```{r}
+irf_plot_data %>% 
+  ggplot(aes(h, mean, linetype = type)) +
+  geom_line(size = 1) +
+  geom_hline(aes(yintercept = 0)) +
+  # scale_color_paletteer_d(
+  #   "ggthemes::Color_Blind",
+  #   labels = c("endogenous w.o. control", "endogenous w. control", "exogenous")
+  # ) +
+  scale_linetype_manual(values = c(1,2,3),
+    labels = c("endogenous w.o. control", "endogenous w. control", "exogenous")
+  ) +
+  theme_ipsum(base_family = "book") +
+  scale_x_continuous(limits = c(1, 100), breaks = seq(0, 100, 10)) +
+  scale_y_continuous(limits = c(-1.2, 1.2)) +
+  labs(
+    x = "Horizon",
+    y = "Effect",
+    color = "",
+    subtitle = "",
+    linetype = ""
+  ) +
+  theme(
+    axis.title.x = element_text(size=rel(1.3)),
+    axis.title.y = element_text(size=rel(1.3)),
+    legend.text = element_text(size=rel(1)),
+    legend.position = "bottom"
+  ) 
+```
+
+```{r}
+parallel::stopCluster(cl)
+```
+

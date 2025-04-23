@@ -1,0 +1,11 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# Ignore data and output folders
+data/
+output/
+reports/
+doc/
+letter/
